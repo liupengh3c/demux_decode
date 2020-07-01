@@ -7,6 +7,7 @@ extern "C" {
 #include <libavutil/samplefmt.h>
 #include <libavutil/timestamp.h>
 #include <libavformat/avformat.h>
+#include <libswresample/swresample.h>
 }
 AVFormatContext* fmt_ctx = NULL;
 AVCodecContext* video_dec_ctx = NULL, * audio_dec_ctx;
@@ -29,6 +30,8 @@ AVPacket pkt;
 int video_frame_count = 0;
 int audio_frame_count = 0;
 
+SwrContext* swr_ctx = NULL;
+
 static int output_video_frame(AVFrame* frame)
 {
     if (frame->width != width || frame->height != height ||
@@ -46,11 +49,11 @@ static int output_video_frame(AVFrame* frame)
         return -1;
     }
 
-    printf("video_frame n:%d coded_n:%d\n",
-        video_frame_count++, frame->coded_picture_number);
+    /*printf("video_frame n:%d coded_n:%d\n",
+        video_frame_count++, frame->coded_picture_number);*/
 
-    /* copy decoded frame to destination buffer:
-     * this is required since rawvideo expects non aligned data */
+        /* copy decoded frame to destination buffer:
+         * this is required since rawvideo expects non aligned data */
     av_image_copy(video_dst_data, video_dst_linesize,
         (const uint8_t**)(frame->data), frame->linesize,
         pix_fmt, width, height);
@@ -84,8 +87,12 @@ static int output_video_frame(AVFrame* frame)
 
 static int output_audio_frame(AVFrame* frame)
 {
+    int  dst_linesize;
     size_t unpadded_linesize = frame->nb_samples * av_get_bytes_per_sample(AVSampleFormat(frame->format));
 
+    uint8_t** dst_data = NULL;
+    av_samples_alloc_array_and_samples(&dst_data, &dst_linesize, 2,
+        1024, AV_SAMPLE_FMT_S16, 0);
 
     /* Write the raw audio data samples of the first plane. This works
      * fine for packed formats (e.g. AV_SAMPLE_FMT_S16). However,
@@ -95,7 +102,13 @@ static int output_audio_frame(AVFrame* frame)
      * in these cases.
      * You should use libswresample or libavfilter to convert the frame
      * to packed data. */
-    fwrite(frame->extended_data[0], 1, unpadded_linesize, audio_dst_file);
+     //fwrite(frame->extended_data[0], 1, unpadded_linesize, audio_dst_file);
+     //fwrite(frame->data[1], 1, unpadded_linesize, audio_dst_file);
+    int dst_nb_samples = av_rescale_rnd(swr_get_delay(swr_ctx, frame->sample_rate) + frame->nb_samples, frame->sample_rate, 44100, AV_ROUND_UP);
+
+    swr_convert(swr_ctx, dst_data, dst_nb_samples, (const uint8_t**)frame->data, frame->nb_samples);
+
+    fwrite(dst_data[0], 1, unpadded_linesize, audio_dst_file);
 
     return 0;
 }
@@ -184,6 +197,14 @@ static int open_codec_context(int* stream_idx,
             return ret;
         }
         *stream_idx = stream_index;
+        if (type == AVMEDIA_TYPE_AUDIO)
+        {
+            swr_ctx = swr_alloc_set_opts(NULL, AV_CH_LAYOUT_STEREO, AV_SAMPLE_FMT_S16, 44100, (*dec_ctx)->channel_layout, (*dec_ctx)->sample_fmt, (*dec_ctx)->sample_rate, 0, NULL);
+            if (swr_ctx == NULL || (ret = swr_init(swr_ctx)) < 0) {
+                fprintf(stderr, "Failed to initialize the resampling context\n");
+                return ret;
+            }
+        }
     }
 
     return 0;
@@ -222,7 +243,7 @@ int main()
 {
     int ret = 0;
 
-    src_filename = "yues.mp4";
+    src_filename = "yueh.mp4";
     video_dst_filename = "yueh.mp4.yuv";
     audio_dst_filename = "yueh.mp4.pcm";
 
